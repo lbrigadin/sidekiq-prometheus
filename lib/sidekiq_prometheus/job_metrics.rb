@@ -1,10 +1,17 @@
 # frozen_string_literal: true
 
 class SidekiqPrometheus::JobMetrics
-  def call(worker, _job, queue)
+  JOB_WRAPPER_CLASS_NAME = 'ActiveJob::QueueAdapters::SidekiqAdapter::JobWrapper'
+  DELAYED_CLASS_NAMES = [
+    'Sidekiq::Extensions::DelayedClass',
+    'Sidekiq::Extensions::DelayedModel',
+    'Sidekiq::Extensions::DelayedMailer',
+  ]
+
+  def call(worker, msg, queue)
     before = GC.stat(:total_allocated_objects) if SidekiqPrometheus.gc_metrics_enabled?
 
-    labels = { class: worker.class.to_s, queue: queue }
+    labels = { class: get_name(worker, msg), queue: queue }
 
     begin
       labels.merge!(custom_labels(worker))
@@ -33,6 +40,37 @@ class SidekiqPrometheus::JobMetrics
   end
 
   private
+  
+  def get_name(worker, msg)
+    class_name = worker.class.to_s
+    if class_name == JOB_WRAPPER_CLASS_NAME
+      get_job_wrapper_name(msg)
+    elsif DELAYED_CLASS_NAMES.include?(class_name)
+      get_delayed_name(msg, class_name)
+    else
+      class_name
+    end
+  end
+  
+  def get_job_wrapper_name(msg)
+    msg['wrapped']
+  end
+
+  def get_delayed_name(msg, class_name)
+    # fallback to class_name since we're relying on the internal implementation
+    # of the delayed extensions
+    # https://github.com/mperham/sidekiq/blob/master/lib/sidekiq/extensions/class_methods.rb
+    begin
+      (target, method_name, _args) = YAML.load(msg['args'].first)
+      if target.class == Class
+        "#{target.name}##{method_name}"
+      else
+        "#{target.class.name}##{method_name}"
+      end
+    rescue
+      class_name
+    end
+  end
 
   def registry
     SidekiqPrometheus
